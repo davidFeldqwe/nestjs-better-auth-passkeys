@@ -1,15 +1,14 @@
 import "reflect-metadata";
+import { ConfigService } from "@nestjs/config";
 import { NestFactory } from "@nestjs/core";
 import type { NestExpressApplication } from "@nestjs/platform-express";
-import { getMigrations } from "better-auth/db/migration";
 import { join } from "node:path";
 import { AppModule } from "./app.module.js";
-import { auth } from "./auth.js";
-
-// Zero-setup: create/upgrade the SQLite tables on boot (same as `npx auth migrate`).
-await (await getMigrations(auth.options)).runMigrations();
+import { configureApp } from "./configure-app.js";
 
 const app = await NestFactory.create<NestExpressApplication>(AppModule, { bodyParser: false });
+configureApp(app);
 app.useStaticAssets(join(import.meta.dirname, "..", "public"));
-await app.listen(Number(process.env.PORT ?? 3000));
-console.log(`Open http://localhost:${process.env.PORT ?? 3000}`);
+const port = Number(app.get(ConfigService).get("PORT") ?? 3000);
+await app.listen(port);
+console.log(`Open http://localhost:${port}`);

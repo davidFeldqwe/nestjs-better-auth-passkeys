@@ -5,10 +5,12 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type { INestApplication } from "@nestjs/common";
 
 process.env.DB_FILE = ":memory:";
+process.env.BETTER_AUTH_SECRET = "test-secret-test-secret-test-secret";
 const { NestFactory } = await import("@nestjs/core");
-const { getMigrations } = await import("better-auth/db/migration");
-const { auth, lastOtp } = await import("../src/auth.js");
 const { AppModule } = await import("../src/app.module.js");
+const { configureApp } = await import("../src/configure-app.js");
+const { assertAuthSecret } = await import("../src/config.js");
+const { MailService } = await import("../src/mail/mail.service.js");
 
 let app: INestApplication;
 let base: string;
@@ -16,9 +18,9 @@ let base: string;
 /** One "device" = one browser cookie jar. */
 class Device {
   jar = new Map<string, string>();
-  async req(path: string, body?: unknown) {
+  async req(path: string, body?: unknown, method?: string) {
     const res = await fetch(base + path, {
-      method: body === undefined ? "GET" : "POST",
+      method: method ?? (body === undefined ? "GET" : "POST"),
       headers: {
         origin: "http://localhost:3000", // Better Auth CSRF check expects the configured origin
         cookie: [...this.jar].map(([k, v]) => `${k}=${v}`).join("; "),
@@ -43,8 +45,8 @@ const email = "alice@example.com";
 const password = "correct-horse-battery";
 
 beforeAll(async () => {
-  await (await getMigrations(auth.options)).runMigrations();
   app = await NestFactory.create(AppModule, { bodyParser: false, logger: false });
+  configureApp(app);
   await app.listen(0);
   base = `http://localhost:${(app.getHttpServer().address() as { port: number }).port}`;
   const d = new Device();
@@ -104,7 +106,8 @@ describe("device binding (two-factor trusted devices)", () => {
 
   async function passOtp(d: Device, trustDevice: boolean) {
     expect((await d.req("/api/auth/two-factor/send-otp", {})).status).toBe(200);
-    return d.req("/api/auth/two-factor/verify-otp", { code: lastOtp.get(email), trustDevice });
+    const code = app.get(MailService).lastMessage?.text.match(/\d{6}/)?.[0];
+    return d.req("/api/auth/two-factor/verify-otp", { code, trustDevice });
   }
 
   beforeAll(async () => {
@@ -163,5 +166,73 @@ describe("device binding (two-factor trusted devices)", () => {
     d.jar.set("better-auth.trust_device", "forged.value");
     const r = await d.req("/api/auth/sign-in/email", { email, password });
     expect(r.body.twoFactorRedirect).toBe(true);
+  });
+
+  it("delivers the OTP through MailService", async () => {
+    const d = new Device();
+    await d.req("/api/auth/sign-in/email", { email, password });
+    expect((await d.req("/api/auth/two-factor/send-otp", {})).status).toBe(200);
+    const message = app.get(MailService).lastMessage;
+    expect(message?.to).toBe(email);
+    expect(message?.text).toMatch(/\d{6}/);
+  });
+});
+
+describe("auth secret", () => {
+  it("rejects a missing or short BETTER_AUTH_SECRET", () => {
+    expect(() => assertAuthSecret(undefined)).toThrow(/32 characters/);
+    expect(() => assertAuthSecret("too-short")).toThrow(/32 characters/);
+    expect(assertAuthSecret("test-secret-test-secret-test-secret").length).toBeGreaterThanOrEqual(32);
+  });
+});
+
+describe("notes ownership", () => {
+  const ada = new Device();
+  const bob = new Device();
+  const admin = new Device();
+  let adaNoteId: string;
+
+  beforeAll(async () => {
+    expect((await ada.req("/api/auth/sign-up/email", { email: "ada@example.com", password, name: "Ada" })).status).toBe(200);
+    expect((await bob.req("/api/auth/sign-up/email", { email: "bob@example.com", password, name: "Bob" })).status).toBe(200);
+    expect(
+      (
+        await admin.req("/api/auth/sign-up/email", {
+          email: "admin@example.com",
+          password,
+          name: "Admin",
+          role: "admin",
+        })
+      ).status,
+    ).toBe(200);
+    const created = await ada.req("/api/notes", { title: "Ada's note", content: "secret" });
+    expect(created.status).toBe(201);
+    adaNoteId = created.body.id;
+  });
+
+  it("lets a user see and delete only their own notes, and an admin see and delete all", async () => {
+    const adaList = await ada.req("/api/notes");
+    expect(adaList.status).toBe(200);
+    expect(adaList.body.map((n: { id: string }) => n.id)).toEqual([adaNoteId]);
+
+    const bobCreated = await bob.req("/api/notes", { title: "Bob's note", content: "also secret" });
+    expect(bobCreated.status).toBe(201);
+    expect((await ada.req("/api/notes")).body.map((n: { id: string }) => n.id)).not.toContain(bobCreated.body.id);
+    expect((await bob.req("/api/notes")).body.map((n: { id: string }) => n.id)).toEqual([bobCreated.body.id]);
+
+    expect((await bob.req(`/api/notes/${adaNoteId}`, undefined, "DELETE")).body.deleted).toBe(false);
+    expect((await ada.req("/api/notes")).body.map((n: { id: string }) => n.id)).toContain(adaNoteId);
+
+    const me = await admin.req("/api/me");
+    expect(me.body.user.role).toBe("admin");
+    const all = await admin.req("/api/notes");
+    expect(all.body.map((n: { id: string }) => n.id)).toEqual(expect.arrayContaining([adaNoteId, bobCreated.body.id]));
+    expect((await admin.req(`/api/notes/${adaNoteId}`, undefined, "DELETE")).body.deleted).toBe(true);
+    expect((await ada.req("/api/notes")).body.map((n: { id: string }) => n.id)).not.toContain(adaNoteId);
+  });
+
+  it("rejects a note body that fails the DTO", async () => {
+    expect((await ada.req("/api/notes", {})).status).toBe(400);
+    expect((await ada.req("/api/notes", { title: "", content: "x" })).status).toBe(400);
   });
 });

@@ -1,36 +1,35 @@
-// Better Auth instance. Follows:
-//  - https://www.better-auth.com/docs/installation (SQLite via better-sqlite3)
-//  - https://www.better-auth.com/docs/plugins/passkey
-//  - https://www.better-auth.com/docs/plugins/2fa (OTP + trusted devices)
-import { betterAuth } from "better-auth";
-import { twoFactor } from "better-auth/plugins";
 import { passkey } from "@better-auth/passkey";
-import Database from "better-sqlite3";
+import { betterAuth } from "better-auth";
+import { drizzleAdapter } from "better-auth/adapters/drizzle";
+import { twoFactor } from "better-auth/plugins";
+import type { Database } from "./database/database.module.js";
+import type { MailService } from "./mail/mail.service.js";
 
-const PORT = Number(process.env.PORT ?? 3000);
-const ORIGIN = `http://localhost:${PORT}`;
-
-// ponytail: OTPs go to the console and an in-memory map (tests read it). Swap for email/SMS in a real app.
-export const lastOtp = new Map<string, string>();
-
-export function createAuth(dbFile = process.env.DB_FILE ?? "auth.sqlite") {
+export function createAuth(db: Database, secret: string, port: number, mail: MailService) {
+  const origin = `http://localhost:${port}`;
   return betterAuth({
-    baseURL: ORIGIN,
-    secret: process.env.BETTER_AUTH_SECRET ?? "dev-only-secret-change-me-dev-only-secret",
-    database: new Database(dbFile),
+    baseURL: origin,
+    secret,
+    database: drizzleAdapter(db, { provider: "sqlite" }),
     emailAndPassword: { enabled: true },
+    user: {
+      additionalFields: {
+        role: {
+          type: "string",
+          required: false,
+          defaultValue: "user",
+        },
+      },
+    },
     plugins: [
-      passkey({ rpID: "localhost", rpName: "NestJS Better Auth Passkeys Demo", origin: ORIGIN }),
+      passkey({ rpID: "localhost", rpName: "NestJS Better Auth Passkeys Demo", origin }),
       twoFactor({
         otpOptions: {
           async sendOTP({ user, otp }) {
-            lastOtp.set(user.email, otp);
-            console.log(`[2FA] OTP for ${user.email}: ${otp}`);
+            await mail.sendOtp(user.email, otp);
           },
         },
       }),
     ],
   });
 }
-
-export const auth = createAuth();

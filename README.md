@@ -2,7 +2,7 @@
 
 A small NestJS + TypeScript demo of **passkeys (FIDO2/WebAuthn)** and **device binding (trusted devices for 2FA)** built with [Better Auth](https://www.better-auth.com). SQLite storage, no setup.
 
-> **Scope:** this is a tutorial-level demo. It is not production code. It uses a hard-coded dev secret, `rpID: "localhost"`, OTP codes printed to the console, and no rate limiting, email verification or account recovery.
+> **Scope:** this is a tutorial-level demo. It is not production code. It uses `rpID: "localhost"`, prints OTP codes to the console when SMTP is not set, and has no rate limiting, email verification or account recovery. Sign-up accepts a `role` (default `user`), same as the NestJS example these structure patterns were ported from.
 
 ## What it does
 
@@ -10,9 +10,10 @@ A small NestJS + TypeScript demo of **passkeys (FIDO2/WebAuthn)** and **device b
 |---|---|
 | Email/password sign-up and sign-in | Better Auth core (`emailAndPassword`) |
 | Passkey registration and sign-in | `@better-auth/passkey` plugin (WebAuthn via SimpleWebAuthn on the server) |
-| Second factor | Better Auth `twoFactor` plugin, OTP method (code printed to the server log) |
+| Second factor | Better Auth `twoFactor` plugin. The OTP is sent by an injectable `MailService` (nodemailer). With no `SMTP_HOST`, nodemailer uses `jsonTransport` and the code is printed to the server log |
 | Device binding | Better Auth `twoFactor` **trusted devices** (`trustDevice: true`), described below |
 | NestJS integration | `@thallesp/nestjs-better-auth`: Better Auth mounted at `/api/auth/*`, global `AuthGuard`, a protected `GET /api/me` |
+| Notes | `GET/POST /api/notes` and `DELETE /api/notes/:id`. A user sees and deletes only their own notes. An admin sees and deletes all. The create body is a class-validator DTO |
 | Browser page | `public/index.html`: plain HTML and JS, using the browser's native `PublicKeyCredential.parse*OptionsFromJSON()` and `credential.toJSON()` |
 
 ### What "device binding" means here
@@ -31,9 +32,12 @@ So a "device" here is **a browser cookie jar**. The binding is not hardware-boun
 Needs Node 22 or later. The browser page needs a recent Chrome, Safari 18.4+ or Firefox 119+ for the native WebAuthn JSON helpers.
 
 ```bash
+cp .env.example .env   # set BETTER_AUTH_SECRET to at least 32 characters
 npm install
-npm start          # builds, runs migrations on boot, serves http://localhost:3000
+npm start              # builds, applies drizzle migrations on boot, serves http://localhost:3000
 ```
+
+`BETTER_AUTH_SECRET`, `PORT`, `DB_FILE` and the `SMTP_*` settings are read with `@nestjs/config`. The process exits at boot if the secret is missing or shorter than 32 characters. Leave `SMTP_HOST` empty for local use. To use Postgres or MySQL instead of SQLite, change the Drizzle driver, `drizzleAdapter`'s `provider`, and the `dialect` in `drizzle.config.ts`, then regenerate the schema (`npx auth generate`) and the migrations (`npx drizzle-kit generate`).
 
 Open http://localhost:3000:
 
@@ -57,6 +61,9 @@ The tests run against the real Nest app and Better Auth on in-memory SQLite, ove
 - `GET /passkey/generate-authenticate-options`: anonymous; returns `rpId` and a fresh challenge each call.
 - `POST /passkey/verify-authentication` with a made-up assertion is rejected and creates no session.
 - Trusted device: the first login asks for 2FA. Verifying with `trustDevice` sets the cookie. The trusted device then skips 2FA and the cookie rotates. A new device is challenged. Verifying without `trustDevice` does not bind. A replayed old cookie and a forged cookie are both challenged.
+- The OTP from `send-otp` is the code stored on `MailService`.
+- `assertAuthSecret` throws when `BETTER_AUTH_SECRET` is missing or shorter than 32 characters. The auth factory calls it, so boot fails the same way.
+- Notes: user A cannot see or delete user B's note. An admin can. A body that fails the DTO returns 400.
 
 **Not tested:**
 - No WebAuthn ceremony is faked in the test suite, so successful `verify-registration` and `verify-authentication` are not unit-tested.
@@ -68,22 +75,37 @@ The tests run against the real Nest app and Better Auth on in-memory SQLite, ove
 | Part | Guide |
 |---|---|
 | Better Auth setup, SQLite, migrations | https://www.better-auth.com/docs/installation · https://www.better-auth.com/docs/adapters/sqlite |
-| NestJS integration (`bodyParser: false`, `AuthModule.forRoot`, `@Session`) | https://www.better-auth.com/docs/integrations/nestjs |
+| NestJS integration (`bodyParser: false`, `AuthModule.forRootAsync`, `@Session`) | https://www.better-auth.com/docs/integrations/nestjs |
 | Passkey plugin (`rpID`, `rpName`, `origin`, endpoints) | https://www.better-auth.com/docs/plugins/passkey |
 | Two-factor plugin, OTP, trusted devices | https://www.better-auth.com/docs/plugins/2fa |
+| Drizzle adapter (`drizzleAdapter`, schema generate) | https://www.better-auth.com/docs/adapters/drizzle |
+| Additional user fields (`role`) | https://www.better-auth.com/docs/concepts/database#extending-core-schema |
+| NestJS configuration (`ConfigModule`, `ConfigService`) | https://docs.nestjs.com/techniques/configuration |
+| Drizzle with SQLite (`better-sqlite3`, migrations) | https://orm.drizzle.team/docs/sqlite/get-started-sqlite |
+
+The Nest layout — async `AuthModule`, a global database module, `ConfigModule`, and note ownership — was ported from a Better Auth NestJS example. This demo stays on SQLite. It does not add that example's manual auth controller, because the library already mounts the handler. The example typed the note body inline, so validation never ran; this demo uses a class DTO with the global `ValidationPipe`.
 
 Where the demo differs from the guides:
-- Migrations run on boot with `getMigrations()` instead of `npx auth migrate`, so nothing has to be set up.
+- Migrations are drizzle-kit SQL files, applied on boot with `migrate()`, so nothing has to be set up by hand.
+- The OTP goes through `MailService`. With no SMTP host, nodemailer uses `jsonTransport` and the code is logged.
 - The HTML page calls the plugin's HTTP endpoints (`generate-register-options` → `navigator.credentials.create` → `verify-registration`, and the same pattern for sign-in) directly. It does not use `authClient.passkey.addPasskey()` / `authClient.signIn.passkey()`, because those need a bundler. The client SDK runs the same calls internally.
 
 ## Layout
 
 ```
-src/auth.ts         Better Auth instance (passkey + twoFactor plugins, SQLite)
-src/app.module.ts   AuthModule.forRoot + protected GET /api/me
-src/main.ts         bootstrap: migrations, bodyParser: false, static page
-public/index.html   browser demo page
-test/flows.test.ts  server-side flow tests
+src/auth.ts          createAuth(): passkey + twoFactor, drizzleAdapter, role field
+src/app.module.ts    ConfigModule, AuthModule.forRootAsync, protected GET /api/me
+src/main.ts          bootstrap: bodyParser false, ValidationPipe, static page
+src/config.ts        rejects a missing or short BETTER_AUTH_SECRET
+src/database/        global Drizzle connection; migrations run when it is created
+src/db/              Better Auth tables generated by the CLI (passkey, twoFactor, role)
+src/mail/            MailService (nodemailer)
+src/note/            note table, ownership, CreateNoteDto
+drizzle/             drizzle-kit SQL migrations
+drizzle.config.ts
+.env.example         BETTER_AUTH_SECRET, PORT, DB_FILE, SMTP_*
+public/index.html    browser demo page
+test/flows.test.ts   server-side flow tests
 ```
 
 MIT licensed.
