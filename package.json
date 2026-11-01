@@ -1,0 +1,38 @@
+{
+  "name": "nestjs-better-auth-passkeys",
+  "version": "1.0.0",
+  "description": "Passkeys (WebAuthn) and trusted-device 2FA on NestJS with Better Auth — tutorial-level demo",
+  "scripts": {
+    "build": "tsc",
+    "start": "tsc && node dist/main.js",
+    "test": "vitest run"
+  },
+  "keywords": [
+    "nestjs",
+    "better-auth",
+    "passkeys",
+    "webauthn",
+    "fido2",
+    "2fa"
+  ],
+  "author": "",
+  "license": "MIT",
+  "type": "module",
+  "dependencies": {
+    "@better-auth/passkey": "^1.7.15",
+    "@nestjs/common": "^12.3.2",
+    "@nestjs/core": "^12.3.2",
+    "@nestjs/platform-express": "^12.3.2",
+    "@thallesp/nestjs-better-auth": "^2.8.0",
+    "better-auth": "^1.7.15",
+    "better-sqlite3": "^13.0.3",
+    "reflect-metadata": "^0.2.2",
+    "rxjs": "^7.8.2"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^9.6.0",
+    "@types/node": "^26.6.6",
+    "typescript": "5.9",
+    "vitest": "^5.0.5"
+  }
+}

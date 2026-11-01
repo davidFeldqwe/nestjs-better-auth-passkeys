@@ -1,0 +1,78 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>NestJS + Better Auth: passkeys & trusted devices</title>
+<style>
+  body { font: 15px/1.5 system-ui, sans-serif; max-width: 42rem; margin: 2rem auto; padding: 0 1rem; }
+  fieldset { margin: 1rem 0; } label { display: block; margin: .25rem 0; }
+  pre { background: #f4f4f4; padding: .75rem; white-space: pre-wrap; }
+</style>
+</head>
+<body>
+<h1>Passkeys & trusted devices demo</h1>
+<p>NestJS + Better Auth on <code>localhost</code>. Server log prints 2FA codes.</p>
+
+<fieldset>
+  <legend>1. Email / password</legend>
+  <label>Email <input id="email" type="email" value="demo@example.com" autocomplete="username webauthn"></label>
+  <label>Password <input id="password" type="password" value="password1234" autocomplete="current-password"></label>
+  <button onclick="signUp()">Sign up</button>
+  <button onclick="signIn()">Sign in</button>
+  <button onclick="call('/api/auth/sign-out', {})">Sign out</button>
+  <button onclick="call('/api/me', null, 'GET')">GET /api/me</button>
+</fieldset>
+
+<fieldset>
+  <legend>2. Passkey (WebAuthn)</legend>
+  <button onclick="registerPasskey()">Register passkey (must be signed in)</button>
+  <button onclick="signInPasskey()">Sign in with passkey</button>
+</fieldset>
+
+<fieldset>
+  <legend>3. Second factor + device binding</legend>
+  <button onclick="call('/api/auth/two-factor/enable', { password: val('password'), method: 'otp' })">Enable 2FA (OTP)</button>
+  <label>OTP <input id="otp" inputmode="numeric"></label>
+  <label><input id="trust" type="checkbox" checked> Trust this device for 30 days</label>
+  <button onclick="call('/api/auth/two-factor/send-otp', {})">Send OTP</button>
+  <button onclick="call('/api/auth/two-factor/verify-otp', { code: val('otp'), trustDevice: document.getElementById('trust').checked })">Verify OTP</button>
+</fieldset>
+
+<pre id="out">—</pre>
+
+<script>
+// No framework, no bundler: the browser's own WebAuthn JSON helpers
+// (PublicKeyCredential.parse*OptionsFromJSON / credential.toJSON) do what @simplewebauthn/browser does.
+const out = document.getElementById('out');
+const val = id => document.getElementById(id).value;
+const show = (label, data) => (out.textContent = label + '\n' + JSON.stringify(data, null, 2));
+
+async function call(path, body, method = 'POST') {
+  const res = await fetch(path, {
+    method, credentials: 'include',
+    headers: body ? { 'content-type': 'application/json' } : {},
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  const data = await res.json().catch(() => null);
+  show(`${method} ${path} → ${res.status}`, data);
+  if (!res.ok) throw new Error(data?.message ?? res.status);
+  return data;
+}
+
+const signUp = () => call('/api/auth/sign-up/email', { email: val('email'), password: val('password'), name: val('email') });
+const signIn = () => call('/api/auth/sign-in/email', { email: val('email'), password: val('password') });
+
+async function registerPasskey() {
+  const options = await call('/api/auth/passkey/generate-register-options', null, 'GET');
+  const cred = await navigator.credentials.create({ publicKey: PublicKeyCredential.parseCreationOptionsFromJSON(options) });
+  await call('/api/auth/passkey/verify-registration', { response: cred.toJSON(), name: 'demo passkey' });
+}
+
+async function signInPasskey() {
+  const options = await call('/api/auth/passkey/generate-authenticate-options', null, 'GET');
+  const cred = await navigator.credentials.get({ publicKey: PublicKeyCredential.parseRequestOptionsFromJSON(options) });
+  await call('/api/auth/passkey/verify-authentication', { response: cred.toJSON() });
+}
+</script>
+</body>
+</html>
