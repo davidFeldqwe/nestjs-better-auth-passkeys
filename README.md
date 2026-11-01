@@ -2,7 +2,7 @@
 
 A small NestJS + TypeScript demo of **passkeys (FIDO2/WebAuthn)** and **device binding (trusted devices for 2FA)** built with [Better Auth](https://www.better-auth.com). SQLite storage, no setup.
 
-> **Scope:** this is a tutorial-level demo. It is not production code. It uses `rpID: "localhost"`, prints OTP codes to the console when SMTP is not set, and has no rate limiting, email verification or account recovery. Sign-up accepts a `role` (default `user`), same as the NestJS example these structure patterns were ported from.
+> **Scope:** this is a tutorial-level demo. It is not production code. It uses `rpID: "localhost"`, prints OTP codes to the console when SMTP is not set, and has no rate limiting, email verification or account recovery. Every account gets `role: "user"`. The field is `input: false`, so a client can't make itself admin at sign-up (the example these patterns came from allowed that). Promote an admin directly in the database.
 
 ## What it does
 

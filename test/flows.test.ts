@@ -11,6 +11,9 @@ const { AppModule } = await import("../src/app.module.js");
 const { configureApp } = await import("../src/configure-app.js");
 const { assertAuthSecret } = await import("../src/config.js");
 const { MailService } = await import("../src/mail/mail.service.js");
+const { DATABASE_CONNECTION } = await import("../src/database/database-connection.js");
+const { user: userTable } = await import("../src/db/auth-schema.js");
+const { eq } = await import("drizzle-orm");
 
 let app: INestApplication;
 let base: string;
@@ -201,10 +204,13 @@ describe("notes ownership", () => {
           email: "admin@example.com",
           password,
           name: "Admin",
-          role: "admin",
+          role: "admin", // ignored: role is input:false
         })
       ).status,
     ).toBe(200);
+    expect((await admin.req("/api/me")).body.user.role).toBe("user");
+    // Promote server-side, the only way to become admin.
+    app.get(DATABASE_CONNECTION).update(userTable).set({ role: "admin" }).where(eq(userTable.email, "admin@example.com")).run();
     const created = await ada.req("/api/notes", { title: "Ada's note", content: "secret" });
     expect(created.status).toBe(201);
     adaNoteId = created.body.id;

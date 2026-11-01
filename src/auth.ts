@@ -18,6 +18,7 @@ export function createAuth(db: Database, secret: string, port: number, mail: Mai
           type: "string",
           required: false,
           defaultValue: "user",
+          input: false, // clients can't set their own role at sign-up; promote admins server-side
         },
       },
     },
