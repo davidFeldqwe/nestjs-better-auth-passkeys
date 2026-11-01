@@ -3,6 +3,7 @@ import { betterAuth } from "better-auth";
 import { drizzleAdapter } from "better-auth/adapters/drizzle";
 import { twoFactor } from "better-auth/plugins";
 import type { Database } from "./database/database.module.js";
+import { deviceBinding } from "./device-binding/index.js";
 import type { MailService } from "./mail/mail.service.js";
 
 export function createAuth(db: Database, secret: string, port: number, mail: MailService) {
@@ -31,6 +32,7 @@ export function createAuth(db: Database, secret: string, port: number, mail: Mai
           },
         },
       }),
+      deviceBinding(),
     ],
   });
 }

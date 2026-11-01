@@ -11,21 +11,30 @@ A small NestJS + TypeScript demo of **passkeys (FIDO2/WebAuthn)** and **device b
 | Email/password sign-up and sign-in | Better Auth core (`emailAndPassword`) |
 | Passkey registration and sign-in | `@better-auth/passkey` plugin (WebAuthn via SimpleWebAuthn on the server) |
 | Second factor | Better Auth `twoFactor` plugin. The OTP is sent by an injectable `MailService` (nodemailer). With no `SMTP_HOST`, nodemailer uses `jsonTransport` and the code is printed to the server log |
-| Device binding | Better Auth `twoFactor` **trusted devices** (`trustDevice: true`), described below |
+| Device binding | Two mechanisms, described below. A trusted-device **cookie** (bearer token) and a browser **P-256 key** (proof of possession) |
 | NestJS integration | `@thallesp/nestjs-better-auth`: Better Auth mounted at `/api/auth/*`, global `AuthGuard`, a protected `GET /api/me` |
 | Notes | `GET/POST /api/notes` and `DELETE /api/notes/:id`. A user sees and deletes only their own notes. An admin sees and deletes all. The create body is a class-validator DTO |
 | Browser page | `public/index.html`: plain HTML and JS, using the browser's native `PublicKeyCredential.parse*OptionsFromJSON()` and `credential.toJSON()` |
 
-### What "device binding" means here
+### Device binding
 
-The binding comes from Better Auth's two-factor trusted-device feature. Nothing was custom-built for it:
+A password sign-in for a user with 2FA enabled returns `twoFactorRedirect: true` and no session. Two different things can then satisfy the second factor. The 2FA gate covers password sign-in only. A passkey sign-in already counts as possession plus user verification, and Better Auth does not run the 2FA step for it.
 
-1. A user with 2FA enabled signs in with a password. The server returns `twoFactorRedirect: true` and no session.
-2. The user verifies the OTP with `trustDevice: true`. The server stores a verification row `trust-device-<random>` → `userId` with a 30-day expiry. It also sets a signed, httpOnly `better-auth.trust_device` cookie that holds `HMAC(secret, userId!trustId)!trustId`.
-3. On the next password sign-in from that browser, the server checks the HMAC, the DB row, the user and the expiry. If they pass, it **skips the second factor** and **rotates** the identifier and the cookie, so an old copy of the cookie stops working.
-4. A browser without the cookie, or with a forged or replayed cookie, gets the 2FA challenge again.
+**Trusted-device cookie (weak, a bearer token).** This is Better Auth's `twoFactor` `trustDevice: true` flow, unchanged:
 
-So a "device" here is **a browser cookie jar**. The binding is not hardware-bound or attested. Anyone who copies the current cookie before it rotates can pass as the device. The 2FA gate covers password sign-in only. A passkey sign-in already counts as possession plus user verification, and Better Auth does not run the 2FA step for it.
+1. The user verifies the OTP with `trustDevice: true`. The server stores a verification row `trust-device-<random>` → `userId` with a 30-day expiry. It also sets a signed, httpOnly `better-auth.trust_device` cookie that holds `HMAC(secret, userId!trustId)!trustId`.
+2. On the next password sign-in from that browser, the server checks the HMAC, the DB row, the user and the expiry. If they pass, it **skips the second factor** and **rotates** the identifier and the cookie, so an old copy of the cookie stops working.
+3. A browser without the cookie, or with a forged or replayed cookie, gets the 2FA challenge again.
+
+Anyone who copies the current cookie before it rotates can pass as the device. The cookie is not hardware-bound or attested.
+
+**Device key (proof of possession).** A custom Better Auth plugin, `src/device-binding/`, stores only a public key. The browser creates a non-extractable ECDSA P-256 key with `crypto.subtle.generateKey`, keeps the `CryptoKey` in IndexedDB, and `POST /api/auth/device-binding/register` sends the public JWK (no `d`). While a 2FA sign-in is pending (the twoFactor plugin's signed `two_factor` cookie), `POST /api/auth/device-binding/challenge` returns a random nonce that expires in 2 minutes. The browser signs the nonce bytes. `POST /api/auth/device-binding/verify` checks the signature with `crypto.subtle.verify({ name: "ECDSA", hash: "SHA-256" }, ...)`, consumes the nonce, and finishes the sign-in the same way OTP verification does: create the session, set the session cookie, delete the pending `two_factor` row and expire that cookie. A bad signature, a replay, an expired nonce, a revoked key, or another user's device does not create a session. The OTP path and the trusted-device cookie still work.
+
+What the key is **not**:
+
+- Browser WebCrypto keys are not hardware-backed or attested. Nothing proves the key sits in a secure element.
+- JavaScript cannot export the private key bytes (`extractable: false`), but XSS on this origin can still call `crypto.subtle.sign` with the key while the page is open.
+- Clearing site data deletes IndexedDB, and the binding on that browser is gone. The server keeps the public key until it is revoked.
 
 ## Run
 
@@ -46,6 +55,7 @@ Open http://localhost:3000:
 3. **Enable 2FA (OTP)**, then **Sign out**, then **Sign in**. The response shows `twoFactorRedirect: true`.
 4. **Send OTP**, copy the code from the server log, then **Verify OTP** with "Trust this device" ticked.
 5. Sign out and sign in again: there is no 2FA prompt. A private window (a new device) is asked again.
+6. Or, while signed in, **Bind this device**. Sign out, sign in with the password, then **Complete 2FA with bound device**. No OTP is sent. **List devices** and **Revoke** manage the public keys.
 
 ## Tests
 
@@ -62,6 +72,7 @@ The tests run against the real Nest app and Better Auth on in-memory SQLite, ove
 - `POST /passkey/verify-authentication` with a made-up assertion is rejected and creates no session.
 - Trusted device: the first login asks for 2FA. Verifying with `trustDevice` sets the cookie. The trusted device then skips 2FA and the cookie rotates. A new device is challenged. Verifying without `trustDevice` does not bind. A replayed old cookie and a forged cookie are both challenged.
 - The OTP from `send-otp` is the code stored on `MailService`.
+- Device key: register stores an EC P-256 public JWK and rejects a JWK that contains `d` or is not P-256. `register`, `list` and `revoke` need a session, and one user cannot revoke another's device. After a password sign-in, a signature from the bound key finishes 2FA and no OTP is sent. A signature from a different key, a replayed nonce, an expired nonce, a revoked device, another user's device, or a challenge with no pending 2FA sign-in is rejected and creates no session.
 - `assertAuthSecret` throws when `BETTER_AUTH_SECRET` is missing or shorter than 32 characters. The auth factory calls it, so boot fails the same way.
 - Notes: user A cannot see or delete user B's note. An admin can. A body that fails the DTO returns 400.
 
@@ -78,6 +89,8 @@ The tests run against the real Nest app and Better Auth on in-memory SQLite, ove
 | NestJS integration (`bodyParser: false`, `AuthModule.forRootAsync`, `@Session`) | https://www.better-auth.com/docs/integrations/nestjs |
 | Passkey plugin (`rpID`, `rpName`, `origin`, endpoints) | https://www.better-auth.com/docs/plugins/passkey |
 | Two-factor plugin, OTP, trusted devices | https://www.better-auth.com/docs/plugins/2fa |
+| Custom plugin (`createAuthEndpoint`, plugin schema) | https://www.better-auth.com/docs/guides/your-first-plugin |
+| Browser ECDSA P-256 key (`SubtleCrypto.generateKey`) | https://developer.mozilla.org/en-US/docs/Web/API/SubtleCrypto/generateKey |
 | Drizzle adapter (`drizzleAdapter`, schema generate) | https://www.better-auth.com/docs/adapters/drizzle |
 | Additional user fields (`role`) | https://www.better-auth.com/docs/concepts/database#extending-core-schema |
 | NestJS configuration (`ConfigModule`, `ConfigService`) | https://docs.nestjs.com/techniques/configuration |
@@ -93,7 +106,8 @@ Where the demo differs from the guides:
 ## Layout
 
 ```
-src/auth.ts          createAuth(): passkey + twoFactor, drizzleAdapter, role field
+src/auth.ts          createAuth(): passkey + twoFactor + deviceBinding, drizzleAdapter, role field
+src/device-binding/  ECDSA device-key plugin and its Drizzle table
 src/app.module.ts    ConfigModule, AuthModule.forRootAsync, protected GET /api/me
 src/main.ts          bootstrap: bodyParser false, ValidationPipe, static page
 src/config.ts        rejects a missing or short BETTER_AUTH_SECRET

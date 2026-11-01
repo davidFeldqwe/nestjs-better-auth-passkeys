@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<title>NestJS + Better Auth: passkeys & trusted devices</title>
+<title>NestJS + Better Auth: passkeys & device binding</title>
 <style>
   body { font: 15px/1.5 system-ui, sans-serif; max-width: 42rem; margin: 2rem auto; padding: 0 1rem; }
   fieldset { margin: 1rem 0; } label { display: block; margin: .25rem 0; }
@@ -10,8 +10,8 @@
 </style>
 </head>
 <body>
-<h1>Passkeys & trusted devices demo</h1>
-<p>NestJS + Better Auth on <code>localhost</code>. Server log prints 2FA codes.</p>
+<h1>Passkeys & device binding demo</h1>
+<p>NestJS + Better Auth on <code>localhost</code>. Server log prints 2FA codes. The trusted-device checkbox is a cookie. "Bind this device" stores a non-extractable P-256 key in this browser.</p>
 
 <fieldset>
   <legend>1. Email / password</legend>
@@ -30,12 +30,20 @@
 </fieldset>
 
 <fieldset>
-  <legend>3. Second factor + device binding</legend>
+  <legend>3. Second factor (OTP and trusted-device cookie)</legend>
   <button onclick="call('/api/auth/two-factor/enable', { password: val('password'), method: 'otp' })">Enable 2FA (OTP)</button>
   <label>OTP <input id="otp" inputmode="numeric"></label>
   <label><input id="trust" type="checkbox" checked> Trust this device for 30 days</label>
   <button onclick="call('/api/auth/two-factor/send-otp', {})">Send OTP</button>
   <button onclick="call('/api/auth/two-factor/verify-otp', { code: val('otp'), trustDevice: document.getElementById('trust').checked })">Verify OTP</button>
+</fieldset>
+
+<fieldset>
+  <legend>4. Device key (proof of possession)</legend>
+  <button onclick="bindDevice()">Bind this device</button>
+  <button onclick="completeWithDevice()">Complete 2FA with bound device</button>
+  <button onclick="listDevices()">List devices</button>
+  <button onclick="revokeDevice()">Revoke</button>
 </fieldset>
 
 <pre id="out">—</pre>
@@ -72,6 +80,51 @@ async function signInPasskey() {
   const options = await call('/api/auth/passkey/generate-authenticate-options', null, 'GET');
   const cred = await navigator.credentials.get({ publicKey: PublicKeyCredential.parseRequestOptionsFromJSON(options) });
   await call('/api/auth/passkey/verify-authentication', { response: cred.toJSON() });
+}
+
+// ponytail: IndexedDB + non-extractable WebCrypto. Not hardware-backed; XSS can still sign while this page is open.
+function openDb() {
+  return new Promise((resolve, reject) => {
+    const req = indexedDB.open('device-binding', 1);
+    req.onupgradeneeded = () => req.result.createObjectStore('kv');
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  });
+}
+function idb(mode, run) {
+  return openDb().then((db) => new Promise((resolve, reject) => {
+    const tx = db.transaction('kv', mode);
+    const req = run(tx.objectStore('kv'));
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  }));
+}
+const b64urlToBytes = (s) => {
+  const pad = s.length % 4 === 0 ? '' : '='.repeat(4 - (s.length % 4));
+  return Uint8Array.from(atob(s.replace(/-/g, '+').replace(/_/g, '/') + pad), (c) => c.charCodeAt(0));
+};
+const bytesToB64url = (buf) => btoa(String.fromCharCode(...new Uint8Array(buf))).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+
+async function bindDevice() {
+  const pair = await crypto.subtle.generateKey({ name: 'ECDSA', namedCurve: 'P-256' }, false, ['sign', 'verify']);
+  const publicKey = await crypto.subtle.exportKey('jwk', pair.publicKey);
+  const { deviceId } = await call('/api/auth/device-binding/register', { publicKey, name: 'this browser' });
+  await idb('readwrite', (store) => store.put({ privateKey: pair.privateKey, deviceId }, 'device'));
+}
+async function completeWithDevice() {
+  const saved = await idb('readonly', (store) => store.get('device'));
+  if (!saved) throw new Error('no bound device');
+  const { nonce } = await call('/api/auth/device-binding/challenge', { deviceId: saved.deviceId });
+  // Sign the raw nonce bytes, not the base64url text.
+  const sig = await crypto.subtle.sign({ name: 'ECDSA', hash: 'SHA-256' }, saved.privateKey, b64urlToBytes(nonce));
+  await call('/api/auth/device-binding/verify', { deviceId: saved.deviceId, signature: bytesToB64url(sig) });
+}
+const listDevices = () => call('/api/auth/device-binding/list', null, 'GET');
+async function revokeDevice() {
+  const saved = await idb('readonly', (store) => store.get('device'));
+  if (!saved) throw new Error('no bound device');
+  await call('/api/auth/device-binding/revoke', { deviceId: saved.deviceId });
+  await idb('readwrite', (store) => store.delete('device'));
 }
 </script>
 </body>

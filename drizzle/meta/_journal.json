@@ -8,6 +8,13 @@
       "when": 1793559412438,
       "tag": "0000_spicy_talkback",
       "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "6",
+      "when": 1793560621768,
+      "tag": "0001_device_binding",
+      "breakpoints": true
     }
   ]
 }

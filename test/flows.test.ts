@@ -12,7 +12,7 @@ const { configureApp } = await import("../src/configure-app.js");
 const { assertAuthSecret } = await import("../src/config.js");
 const { MailService } = await import("../src/mail/mail.service.js");
 const { DATABASE_CONNECTION } = await import("../src/database/database-connection.js");
-const { user: userTable } = await import("../src/db/auth-schema.js");
+const { user: userTable, verification: verificationTable } = await import("../src/db/auth-schema.js");
 const { eq } = await import("drizzle-orm");
 
 let app: INestApplication;
@@ -240,5 +240,183 @@ describe("notes ownership", () => {
   it("rejects a note body that fails the DTO", async () => {
     expect((await ada.req("/api/notes", {})).status).toBe(400);
     expect((await ada.req("/api/notes", { title: "", content: "x" })).status).toBe(400);
+  });
+});
+
+describe("device key binding", () => {
+  const password = "correct-horse-battery";
+
+  async function p256(extractable = false) {
+    return crypto.subtle.generateKey({ name: "ECDSA", namedCurve: "P-256" }, extractable, ["sign", "verify"]);
+  }
+
+  async function publicJwk(pair: CryptoKeyPair) {
+    return crypto.subtle.exportKey("jwk", pair.publicKey);
+  }
+
+  async function signNonce(privateKey: CryptoKey, nonce: string) {
+    const sig = await crypto.subtle.sign({ name: "ECDSA", hash: "SHA-256" }, privateKey, Buffer.from(nonce, "base64url"));
+    return Buffer.from(sig).toString("base64url");
+  }
+
+  /** Signed-up user with 2FA on, one bound device, and no session. */
+  async function boundUser(email: string) {
+    const d = new Device();
+    const signed = await d.req("/api/auth/sign-up/email", { email, password, name: email });
+    expect(signed.status).toBe(200);
+    const pair = await p256();
+    const registered = await d.req("/api/auth/device-binding/register", { publicKey: await publicJwk(pair), name: "vitest" });
+    expect(registered.status).toBe(200);
+    expect(typeof registered.body.deviceId).toBe("string");
+    expect((await d.req("/api/auth/two-factor/enable", { password, method: "otp" })).status).toBe(200);
+    await d.req("/api/auth/sign-out", {});
+    return { d, deviceId: registered.body.deviceId as string, privateKey: pair.privateKey, userId: signed.body.user.id as string };
+  }
+
+  async function pending(d: Device, email: string) {
+    const r = await d.req("/api/auth/sign-in/email", { email, password });
+    expect(r.body.twoFactorRedirect).toBe(true);
+    expect(d.has("session_token")).toBe(false);
+  }
+
+  it("binds a key, then a signature finishes 2FA and no OTP is sent", async () => {
+    const { d, deviceId, privateKey } = await boundUser("bind-ok@example.com");
+    const before = app.get(MailService).lastMessage;
+    await pending(d, "bind-ok@example.com");
+    const challenge = await d.req("/api/auth/device-binding/challenge", { deviceId });
+    expect(challenge.status).toBe(200);
+    const verified = await d.req("/api/auth/device-binding/verify", {
+      deviceId,
+      signature: await signNonce(privateKey, challenge.body.nonce),
+    });
+    expect(verified.status).toBe(200);
+    expect(d.has("session_token")).toBe(true);
+    expect(app.get(MailService).lastMessage).toBe(before);
+
+    const listed = await d.req("/api/auth/device-binding/list");
+    expect(listed.status).toBe(200);
+    expect(listed.body.devices.map((device: { id: string }) => device.id)).toEqual([deviceId]);
+  });
+
+  it("rejects a signature from a different key and creates no session", async () => {
+    const { d, deviceId } = await boundUser("bind-bad-sig@example.com");
+    await pending(d, "bind-bad-sig@example.com");
+    const challenge = await d.req("/api/auth/device-binding/challenge", { deviceId });
+    const other = await p256();
+    const verified = await d.req("/api/auth/device-binding/verify", {
+      deviceId,
+      signature: await signNonce(other.privateKey, challenge.body.nonce),
+    });
+    expect(verified.status).toBeGreaterThanOrEqual(400);
+    expect(d.has("session_token")).toBe(false);
+  });
+
+  it("rejects a replayed nonce", async () => {
+    const { d, deviceId, privateKey } = await boundUser("bind-replay@example.com");
+    await pending(d, "bind-replay@example.com");
+    const challenge = await d.req("/api/auth/device-binding/challenge", { deviceId });
+    const signature = await signNonce(privateKey, challenge.body.nonce);
+    expect((await d.req("/api/auth/device-binding/verify", { deviceId, signature })).status).toBe(200);
+    await d.req("/api/auth/sign-out", {});
+    await pending(d, "bind-replay@example.com");
+    const replay = await d.req("/api/auth/device-binding/verify", { deviceId, signature });
+    expect(replay.status).toBeGreaterThanOrEqual(400);
+    expect(d.has("session_token")).toBe(false);
+  });
+
+  it("rejects an expired nonce", async () => {
+    const { d, deviceId, privateKey, userId } = await boundUser("bind-expired@example.com");
+    await pending(d, "bind-expired@example.com");
+    const challenge = await d.req("/api/auth/device-binding/challenge", { deviceId });
+    const signature = await signNonce(privateKey, challenge.body.nonce);
+    app
+      .get(DATABASE_CONNECTION)
+      .update(verificationTable)
+      .set({ expiresAt: new Date(Date.now() - 60_000) })
+      .where(eq(verificationTable.identifier, `device-binding:${userId}:${deviceId}`))
+      .run();
+    const verified = await d.req("/api/auth/device-binding/verify", { deviceId, signature });
+    expect(verified.status).toBeGreaterThanOrEqual(400);
+    expect(d.has("session_token")).toBe(false);
+  });
+
+  it("rejects a revoked device", async () => {
+    const { d, deviceId, privateKey } = await boundUser("bind-revoked@example.com");
+    await pending(d, "bind-revoked@example.com");
+    const challenge = await d.req("/api/auth/device-binding/challenge", { deviceId });
+    expect(
+      (await d.req("/api/auth/device-binding/verify", { deviceId, signature: await signNonce(privateKey, challenge.body.nonce) })).status,
+    ).toBe(200);
+    expect((await d.req("/api/auth/device-binding/revoke", { deviceId })).status).toBe(200);
+    expect((await d.req("/api/auth/device-binding/list")).body.devices).toEqual([]);
+    await d.req("/api/auth/sign-out", {});
+    await pending(d, "bind-revoked@example.com");
+    const again = await d.req("/api/auth/device-binding/challenge", { deviceId });
+    expect(again.status).toBeGreaterThanOrEqual(400);
+    expect(d.has("session_token")).toBe(false);
+  });
+
+  it("rejects another user's device id", async () => {
+    const alice = await boundUser("bind-alice@example.com");
+    const bob = await boundUser("bind-bob@example.com");
+    await pending(alice.d, "bind-alice@example.com");
+    const challenge = await alice.d.req("/api/auth/device-binding/challenge", { deviceId: bob.deviceId });
+    expect(challenge.status).toBeGreaterThanOrEqual(400);
+    const verified = await alice.d.req("/api/auth/device-binding/verify", {
+      deviceId: bob.deviceId,
+      signature: await signNonce(bob.privateKey, "not-a-real-nonce"),
+    });
+    expect(verified.status).toBeGreaterThanOrEqual(400);
+    expect(alice.d.has("session_token")).toBe(false);
+  });
+
+  it("rejects challenge and verify when no 2FA sign-in is pending", async () => {
+    const d = new Device();
+    expect((await d.req("/api/auth/sign-up/email", { email: "bind-open@example.com", password, name: "Open" })).status).toBe(200);
+    const pair = await p256();
+    const registered = await d.req("/api/auth/device-binding/register", { publicKey: await publicJwk(pair), name: "vitest" });
+    const deviceId = registered.body.deviceId as string;
+    expect((await d.req("/api/auth/device-binding/challenge", { deviceId })).status).toBeGreaterThanOrEqual(400);
+    expect(
+      (await d.req("/api/auth/device-binding/verify", { deviceId, signature: "aaaa" })).status,
+    ).toBeGreaterThanOrEqual(400);
+    const anon = new Device();
+    expect((await anon.req("/api/auth/device-binding/challenge", { deviceId })).status).toBeGreaterThanOrEqual(400);
+    expect((await anon.req("/api/auth/device-binding/verify", { deviceId, signature: "aaaa" })).status).toBeGreaterThanOrEqual(400);
+  });
+
+  it("rejects a private JWK and a non-P-256 key, and requires a session to register, list and revoke", async () => {
+    const anon = new Device();
+    const pair = await p256(true);
+    const pub = await publicJwk(pair);
+    expect((await anon.req("/api/auth/device-binding/register", { publicKey: pub, name: "x" })).status).toBe(401);
+    expect((await anon.req("/api/auth/device-binding/list")).status).toBe(401);
+    expect((await anon.req("/api/auth/device-binding/revoke", { deviceId: "x" })).status).toBe(401);
+
+    const d = new Device();
+    expect((await d.req("/api/auth/sign-up/email", { email: "bind-jwk@example.com", password, name: "Jwk" })).status).toBe(200);
+    const priv = await crypto.subtle.exportKey("jwk", pair.privateKey);
+    expect(priv.d).toBeTruthy();
+    expect((await d.req("/api/auth/device-binding/register", { publicKey: priv, name: "private" })).status).toBeGreaterThanOrEqual(400);
+
+    const p384 = await crypto.subtle.generateKey({ name: "ECDSA", namedCurve: "P-384" }, true, ["sign", "verify"]);
+    const p384Jwk = await crypto.subtle.exportKey("jwk", p384.publicKey);
+    expect((await d.req("/api/auth/device-binding/register", { publicKey: p384Jwk, name: "p384" })).status).toBeGreaterThanOrEqual(400);
+
+    const rsa = await crypto.subtle.generateKey(
+      { name: "RSASSA-PKCS1-v1_5", modulusLength: 2048, publicExponent: new Uint8Array([1, 0, 1]), hash: "SHA-256" },
+      true,
+      ["sign", "verify"],
+    );
+    const rsaJwk = await crypto.subtle.exportKey("jwk", rsa.publicKey);
+    expect((await d.req("/api/auth/device-binding/register", { publicKey: rsaJwk, name: "rsa" })).status).toBeGreaterThanOrEqual(400);
+
+    const other = new Device();
+    expect((await other.req("/api/auth/sign-up/email", { email: "bind-victim@example.com", password, name: "Victim" })).status).toBe(200);
+    const victim = await other.req("/api/auth/device-binding/register", { publicKey: pub, name: "victim" });
+    expect(victim.status).toBe(200);
+    expect((await d.req("/api/auth/device-binding/revoke", { deviceId: victim.body.deviceId })).status).toBeGreaterThanOrEqual(400);
+    const stillThere = await other.req("/api/auth/device-binding/list");
+    expect(stillThere.body.devices.map((device: { id: string }) => device.id)).toContain(victim.body.deviceId);
   });
 });
