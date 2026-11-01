@@ -1,6 +1,8 @@
 # nestjs-better-auth-passkeys
 
-A small NestJS + TypeScript demo of **passkeys (FIDO2/WebAuthn)** and **device binding (trusted devices for 2FA)** built with [Better Auth](https://www.better-auth.com). SQLite storage, no setup.
+[![CI](https://github.com/davidFeldqwe/nestjs-better-auth-passkeys/actions/workflows/ci.yml/badge.svg)](https://github.com/davidFeldqwe/nestjs-better-auth-passkeys/actions/workflows/ci.yml)
+
+A small NestJS + TypeScript demo of **passkeys (FIDO2/WebAuthn)** and **device binding for 2FA** built with [Better Auth](https://www.better-auth.com). SQLite storage, no setup.
 
 > **Scope:** this is a tutorial-level demo. It is not production code. It uses `rpID: "localhost"`, prints OTP codes to the console when SMTP is not set, and has no rate limiting, email verification or account recovery. Every account gets `role: "user"`. The field is `input: false`, so a client can't make itself admin at sign-up (the example these patterns came from allowed that). Promote an admin directly in the database.
 
@@ -60,10 +62,11 @@ Open http://localhost:3000:
 ## Tests
 
 ```bash
-npm test
+npm test      # vitest, no browser
+npm run e2e   # Playwright, Chromium only
 ```
 
-The tests run against the real Nest app and Better Auth on in-memory SQLite, over HTTP, with one cookie jar per "device".
+`npm test` runs against the real Nest app and Better Auth on in-memory SQLite, over HTTP, with one cookie jar per "device". Vitest does not collect `e2e/`. Playwright does not collect `test/`.
 
 **Tested:**
 - The Nest `AuthGuard`: `/api/me` returns 401 without a session and 200 with one.
@@ -76,9 +79,13 @@ The tests run against the real Nest app and Better Auth on in-memory SQLite, ove
 - `assertAuthSecret` throws when `BETTER_AUTH_SECRET` is missing or shorter than 32 characters. The auth factory calls it, so boot fails the same way.
 - Notes: user A cannot see or delete user B's note. An admin can. A body that fails the DTO returns 400.
 
+`npm run e2e` boots the app on a free port (origin and `rpID` follow that port) with a temp SQLite file and runs Chromium:
+
+- Passkey: sign up → register passkey → sign out → `/api/me` 401 → sign in with a CDP virtual authenticator → `/api/me` 200.
+- Device key: sign up → enable OTP 2FA → bind this browser → sign out → password sign-in → complete with the bound device → `/api/me` 200, and the page does not call `send-otp` for that sign-in.
+
 **Not tested:**
-- No WebAuthn ceremony is faked in the test suite, so successful `verify-registration` and `verify-authentication` are not unit-tested.
-- I checked them once by hand in headless Chrome with a CDP virtual authenticator: sign up → register passkey → sign out → passkey sign-in → `/api/me` 200. That script is not part of this repo.
+- The vitest file does not fake a WebAuthn ceremony. The successful passkey ceremony is the Playwright spec above, using Chromium's virtual authenticator, not a hardware key.
 - It has not been tried with a hardware security key or with Touch ID / Windows Hello.
 
 ## Guides followed
@@ -91,6 +98,7 @@ The tests run against the real Nest app and Better Auth on in-memory SQLite, ove
 | Two-factor plugin, OTP, trusted devices | https://www.better-auth.com/docs/plugins/2fa |
 | Custom plugin (`createAuthEndpoint`, plugin schema) | https://www.better-auth.com/docs/guides/your-first-plugin |
 | Browser ECDSA P-256 key (`SubtleCrypto.generateKey`) | https://developer.mozilla.org/en-US/docs/Web/API/SubtleCrypto/generateKey |
+| Virtual authenticator (Chrome DevTools WebAuthn, CDP `WebAuthn` domain) | https://developer.chrome.com/docs/devtools/webauthn · https://chromedevtools.github.io/devtools-protocol/tot/WebAuthn/ |
 | Drizzle adapter (`drizzleAdapter`, schema generate) | https://www.better-auth.com/docs/adapters/drizzle |
 | Additional user fields (`role`) | https://www.better-auth.com/docs/concepts/database#extending-core-schema |
 | NestJS configuration (`ConfigModule`, `ConfigService`) | https://docs.nestjs.com/techniques/configuration |
@@ -119,7 +127,9 @@ drizzle/             drizzle-kit SQL migrations
 drizzle.config.ts
 .env.example         BETTER_AUTH_SECRET, PORT, DB_FILE, SMTP_*
 public/index.html    browser demo page
-test/flows.test.ts   server-side flow tests
+test/flows.test.ts   server-side flow tests (vitest)
+e2e/                 Playwright specs (passkey ceremony, device key)
+playwright.config.ts Chromium only; webServer sets PORT, DB_FILE, BETTER_AUTH_SECRET
 ```
 
 MIT licensed.

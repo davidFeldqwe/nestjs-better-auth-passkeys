@@ -5,7 +5,8 @@
   "scripts": {
     "build": "tsc",
     "start": "tsc && node dist/main.js",
-    "test": "vitest run"
+    "test": "vitest run",
+    "e2e": "playwright test"
   },
   "keywords": [
     "nestjs",
@@ -35,6 +36,7 @@
     "rxjs": "^7.8.2"
   },
   "devDependencies": {
+    "@playwright/test": "1.61.1",
     "@types/better-sqlite3": "^9.6.0",
     "@types/node": "^26.6.6",
     "@types/nodemailer": "^8.0.2",
